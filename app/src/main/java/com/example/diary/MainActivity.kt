@@ -45,6 +45,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.rememberAsyncImagePainter
 import com.example.diary.data.DiaryDatabase
@@ -671,16 +673,79 @@ fun AddEditScreen(
             }
             Spacer(modifier = Modifier.height(12.dp))
 
+            var isContentFullscreen by remember { mutableStateOf(false) }
+            val contentCharCount = content.length
+            val contentNonSpaceCount = content.count { !it.isWhitespace() }
+
             OutlinedTextField(
                 value = content,
                 onValueChange = { content = it },
                 label = { Text("内容") },
+                trailingIcon = {
+                    IconButton(onClick = { isContentFullscreen = true }) {
+                        Icon(Icons.Default.Fullscreen, contentDescription = "全屏编辑")
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 150.dp),
                 minLines = 5
             )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text(
+                    text = "$contentCharCount 字 · 不含空白 $contentNonSpaceCount",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
+
+            if (isContentFullscreen) {
+                Dialog(
+                    onDismissRequest = { isContentFullscreen = false },
+                    properties = DialogProperties(
+                        usePlatformDefaultWidth = false,
+                        dismissOnBackPress = true,
+                        dismissOnClickOutside = false
+                    )
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        Scaffold(
+                            topBar = {
+                                TopAppBar(
+                                    title = { Text("$contentCharCount 字 · 不含空白 $contentNonSpaceCount") },
+                                    navigationIcon = {
+                                        IconButton(onClick = { isContentFullscreen = false }) {
+                                            Icon(Icons.Default.FullscreenExit, contentDescription = "退出全屏")
+                                        }
+                                    },
+                                    actions = {
+                                        TextButton(onClick = { isContentFullscreen = false }) { Text("完成") }
+                                    }
+                                )
+                            }
+                        ) { padInner ->
+                            OutlinedTextField(
+                                value = content,
+                                onValueChange = { content = it },
+                                placeholder = { Text("在这里写点什么…") },
+                                modifier = Modifier
+                                    .padding(padInner)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .fillMaxSize()
+                            )
+                        }
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
