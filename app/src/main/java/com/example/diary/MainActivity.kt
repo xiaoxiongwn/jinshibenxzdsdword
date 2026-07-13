@@ -1071,6 +1071,18 @@ fun SettingsScreen(
                 },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("导出日记备份") }
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    scope.launch {
+                        exportMsg = "正在导出，请稍候…"
+                        val entries = db.diaryDao().getAll().first()
+                        val path = exportDiariesWithImages(context, entries)
+                        exportMsg = if (path != null) "已导出到: $path（含图片）" else "导出失败"
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("导出日记备份（含图片，zip）") }
             if (exportMsg.isNotBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(exportMsg, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
@@ -1086,9 +1098,9 @@ fun SettingsScreen(
                 }
             }
             Button(
-                onClick = { importLauncher.launch("application/json") },
+                onClick = { importLauncher.launch("*/*") },
                 modifier = Modifier.fillMaxWidth()
-            ) { Text("导入日记备份") }
+            ) { Text("导入日记备份（.json / .zip）") }
             if (importMsg.isNotBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(importMsg, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
@@ -1673,17 +1685,81 @@ fun exportDiaries(context: Context, entries: List<DiaryEntry>): String? {
 
 suspend fun importDiaries(context: Context, uri: Uri, dao: com.example.diary.data.DiaryDao): Int {
     return try {
-        val jsonText = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: return -1
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return -1
+        val isZip = bytes.size >= 4 &&
+            bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
+            (bytes[2] == 0x03.toByte() || bytes[2] == 0x05.toByte() || bytes[2] == 0x07.toByte())
+        if (isZip) {
+            importDiariesFromZip(context, bytes, dao)
+        } else {
+            importDiariesFromJson(bytes.toString(Charsets.UTF_8), dao) { it }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        -1
+    }
+}
+
+suspend fun importDiariesFromZip(
+    context: Context,
+    bytes: ByteArray,
+    dao: com.example.diary.data.DiaryDao
+): Int {
+    return try {
+        val imagesDir = File(context.filesDir, "images").apply { mkdirs() }
+        val nameMap = HashMap<String, String>() // "images/foo.jpg" -> absolute path in filesDir/images/
+        var jsonText: String? = null
+        java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    when {
+                        entry.name == "diary.json" -> {
+                            jsonText = zis.readBytes().toString(Charsets.UTF_8)
+                        }
+                        entry.name.startsWith("images/") -> {
+                            val ext = entry.name.substringAfterLast('.', "jpg")
+                            val outFile = File(
+                                imagesDir,
+                                "${System.currentTimeMillis()}_${(0..99999).random()}.$ext"
+                            )
+                            FileOutputStream(outFile).use { os -> zis.copyTo(os) }
+                            nameMap[entry.name] = outFile.absolutePath
+                        }
+                    }
+                }
+                entry = zis.nextEntry
+            }
+        }
+        val text = jsonText ?: return -1
+        importDiariesFromJson(text, dao) { p -> nameMap[p] ?: p }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        -1
+    }
+}
+
+suspend fun importDiariesFromJson(
+    jsonText: String,
+    dao: com.example.diary.data.DiaryDao,
+    pathMapper: (String) -> String
+): Int {
+    return try {
         val jsonArray = org.json.JSONArray(jsonText)
         var count = 0
         for (i in 0 until jsonArray.length()) {
             val obj = jsonArray.getJSONObject(i)
+            val rawPaths = obj.optString("imagePaths", "")
+            val remapped = rawPaths.split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .joinToString(",") { pathMapper(it) }
             val entry = DiaryEntry(
                 id = 0,
                 title = obj.optString("title", ""),
                 content = obj.optString("content", ""),
                 date = obj.optLong("date", System.currentTimeMillis()),
-                imagePaths = obj.optString("imagePaths", ""),
+                imagePaths = remapped,
                 isHidden = obj.optBoolean("isHidden", false),
                 category = obj.optString("category", ""),
                 reminderType = obj.optString("reminderType", "none"),
@@ -1698,5 +1774,96 @@ suspend fun importDiaries(context: Context, uri: Uri, dao: com.example.diary.dat
     } catch (e: Exception) {
         e.printStackTrace()
         -1
+    }
+}
+
+fun exportDiariesWithImages(context: Context, entries: List<DiaryEntry>): String? {
+    return try {
+        val ts = System.currentTimeMillis()
+        val name = "diary_backup_$ts.zip"
+
+        // Collect all image absolute paths and assign unique zip filenames
+        val zipNameByAbs = LinkedHashMap<String, String>() // absPath -> "foo.jpg"
+        entries.forEach { entry ->
+            entry.imagePaths.split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .forEach { abs ->
+                    if (!zipNameByAbs.containsKey(abs)) {
+                        val f = File(abs)
+                        val base = f.nameWithoutExtension.ifBlank { "img" }
+                        val ext = f.extension.ifBlank { "jpg" }
+                        var candidate = "$base.$ext"
+                        var i = 1
+                        while (zipNameByAbs.values.contains(candidate)) {
+                            candidate = "${base}_$i.$ext"
+                            i++
+                        }
+                        zipNameByAbs[abs] = candidate
+                    }
+                }
+        }
+
+        // Build JSON with rewritten (relative) image paths
+        val jsonArray = org.json.JSONArray()
+        entries.forEach { entry ->
+            val newPaths = entry.imagePaths.split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .joinToString(",") { abs -> "images/${zipNameByAbs[abs] ?: File(abs).name}" }
+            val obj = org.json.JSONObject().apply {
+                put("title", entry.title)
+                put("content", entry.content)
+                put("date", entry.date)
+                put("imagePaths", newPaths)
+                put("isHidden", entry.isHidden)
+                put("category", entry.category)
+                put("reminderType", entry.reminderType)
+                put("reminderTime", entry.reminderTime)
+                put("reminderInterval", entry.reminderInterval)
+                put("createdAt", entry.createdAt)
+            }
+            jsonArray.put(obj)
+        }
+        val jsonBytes = jsonArray.toString(2).toByteArray(Charsets.UTF_8)
+
+        fun writeZip(os: java.io.OutputStream) {
+            java.util.zip.ZipOutputStream(os).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("diary.json"))
+                zos.write(jsonBytes)
+                zos.closeEntry()
+                zipNameByAbs.forEach { (abs, zipName) ->
+                    val f = File(abs)
+                    if (!f.exists()) return@forEach
+                    zos.putNextEntry(java.util.zip.ZipEntry("images/$zipName"))
+                    f.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/zip")
+                put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/DiaryBackup")
+            }
+            val uri = context.contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+            )
+            if (uri != null) {
+                context.contentResolver.openOutputStream(uri)?.use { os -> writeZip(os) }
+                return "Download/DiaryBackup/$name"
+            }
+        }
+
+        val backupDir = File(context.getExternalFilesDir(null), "DiaryBackup")
+        backupDir.mkdirs()
+        val file = File(backupDir, name)
+        FileOutputStream(file).use { writeZip(it) }
+        file.absolutePath
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
     }
 }
