@@ -89,6 +89,7 @@ private const val PREFS_NAME = "diary_prefs"
 private const val KEY_PASSWORD = "diary_password"
 private const val KEY_UNLOCKED = "diary_unlocked"
 private const val KEY_CATEGORIES = "diary_categories"
+private const val KEY_EXPORT_TREE_URI = "diary_export_tree_uri"
 
 val DEFAULT_CATEGORIES = listOf("工作", "投资", "生活", "其它")
 
@@ -126,6 +127,63 @@ fun getCategories(context: Context): List<String> {
 fun saveCategories(context: Context, categories: List<String>) {
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         .edit().putString(KEY_CATEGORIES, categories.joinToString(",")).apply()
+}
+
+// ===== Word 导出位置（SAF Tree URI） =====
+
+fun getExportTreeUri(context: Context): Uri? {
+    val s = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_EXPORT_TREE_URI, null) ?: return null
+    return try { Uri.parse(s) } catch (_: Exception) { null }
+}
+
+fun saveExportTreeUri(context: Context, uri: Uri) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit().putString(KEY_EXPORT_TREE_URI, uri.toString()).apply()
+}
+
+fun clearExportTreeUri(context: Context) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit().remove(KEY_EXPORT_TREE_URI).apply()
+}
+
+/** 从 tree URI 里解析出人类可读的位置标签，例如 "XXXX-XXXX:DiaryWord" → "DiaryWord"。 */
+fun labelForTreeUri(uri: Uri): String {
+    val seg = uri.lastPathSegment ?: return "所选文件夹"
+    val decoded = try { Uri.decode(seg) } catch (_: Exception) { seg }
+    val after = decoded.substringAfter(':', "")
+    return if (after.isBlank()) "所选存储卷（根目录）" else after
+}
+
+fun getExportLocationLabel(context: Context): String {
+    val uri = getExportTreeUri(context) ?: return "内置存储 Download/DiaryWord"
+    return "已选文件夹：${labelForTreeUri(uri)}"
+}
+
+/**
+ * 尝试往用户通过 ACTION_OPEN_DOCUMENT_TREE 选好的目录（可能是 U 盘）里写一个文件。
+ * 成功返回展示路径；失败返回 null。
+ */
+fun writeWordToTreeUri(
+    context: Context,
+    treeUri: Uri,
+    fileName: String,
+    mime: String,
+    bytes: ByteArray
+): String? {
+    return try {
+        val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+        val newUri = android.provider.DocumentsContract.createDocument(
+            context.contentResolver, parent, mime, fileName
+        ) ?: return null
+        context.contentResolver.openOutputStream(newUri)?.use { it.write(bytes) }
+            ?: return null
+        "${labelForTreeUri(treeUri)}/$fileName"
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -959,8 +1017,13 @@ fun DetailScreen(
     }
 
     if (showExport) {
+        val exportHint = remember(showExport) {
+            val where = getExportLocationLabel(context)
+            "将保存到：$where。可在「设置 → Word 导出位置」里改到 U 盘等外部存储。"
+        }
         ExportWordDialog(
             defaultName = displayEntry.title.ifBlank { "日记_" + formatDate(displayEntry.date) },
+            locationHint = exportHint,
             onDismiss = { showExport = false },
             onConfirm = { rawName ->
                 showExport = false
@@ -1105,6 +1168,60 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(importMsg, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
             }
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Word 导出位置（支持 U 盘 / 外置存储）
+            Text("Word 导出位置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("默认导出到内置存储的 Download/DiaryWord。你也可以选择一个外部文件夹（比如插入手机的 U 盘上的目录），之后所有 Word 导出都会写到那里。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Spacer(modifier = Modifier.height(8.dp))
+            var exportLocation by remember { mutableStateOf(getExportLocationLabel(context)) }
+            Text("当前：$exportLocation",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(8.dp))
+            val pickExportDir = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocumentTree()
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    try {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    saveExportTreeUri(context, uri)
+                    exportLocation = getExportLocationLabel(context)
+                    Toast.makeText(context, "已设置导出位置：${labelForTreeUri(uri)}", Toast.LENGTH_LONG).show()
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        try {
+                            pickExportDir.launch(null)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法打开系统目录选择器", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("选择文件夹（可选 U 盘）") }
+                OutlinedButton(
+                    onClick = {
+                        clearExportTreeUri(context)
+                        exportLocation = getExportLocationLabel(context)
+                        Toast.makeText(context, "已恢复默认（内置 Download）", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = getExportTreeUri(context) != null,
+                    modifier = Modifier.weight(1f)
+                ) { Text("恢复默认") }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("提示：写入前请确保 U 盘已插入并被系统识别；若所选位置暂时不可用，App 会自动写到内置 Download/DiaryWord。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             Spacer(modifier = Modifier.height(24.dp))
 
             // 按时间段导出 Word
@@ -1425,14 +1542,14 @@ fun reminderLabel(type: String): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ExportWordDialog(defaultName: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+fun ExportWordDialog(defaultName: String, locationHint: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var name by remember { mutableStateOf(defaultName) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("导出为 Word") },
         text = {
             Column {
-                Text("文件将保存到 Download/DiaryWord 目录，可用 WPS / Word 打开。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                Text(locationHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
                     value = name,
@@ -1567,6 +1684,14 @@ fun exportRangeAsWord(context: Context, entries: List<DiaryEntry>, rawName: Stri
         val html = buildRangeDocHtml(title, prepared)
         val bytes = html.toByteArray(Charsets.UTF_8)
 
+        // 1) 用户如果通过 SAF 选择了导出目录（例如 U 盘），优先写到那里
+        getExportTreeUri(context)?.let { treeUri ->
+            writeWordToTreeUri(context, treeUri, fileName, "application/msword", bytes)?.let { p ->
+                return RangeExportResult(path = p, included = prepared.size, skippedEncrypted = skipped)
+            }
+            // 到这一步说明写外部目录失败（U 盘拔了、权限失效等），继续走内置兜底
+        }
+
         val path: String? = if (Build.VERSION.SDK_INT >= 29) {
             val values = android.content.ContentValues().apply {
                 put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -1602,6 +1727,14 @@ fun exportEntryAsWord(context: Context, entry: DiaryEntry, rawName: String): Str
         val fileName = sanitizeFileName(rawName) + ".doc"
         val html = buildEntryDocHtml(entry)
         val bytes = html.toByteArray(Charsets.UTF_8)
+
+        // 1) 用户如果通过 SAF 选择了导出目录（例如 U 盘），优先写到那里
+        getExportTreeUri(context)?.let { treeUri ->
+            writeWordToTreeUri(context, treeUri, fileName, "application/msword", bytes)?.let { p ->
+                return p
+            }
+            // 到这一步说明写外部目录失败（U 盘拔了、权限失效等），继续走内置兜底
+        }
 
         if (Build.VERSION.SDK_INT >= 29) {
             val values = android.content.ContentValues().apply {
