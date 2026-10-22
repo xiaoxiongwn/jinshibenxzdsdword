@@ -7,4 +7,6 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- 通知强调色：小图标着色 / 应用名 / Action 按钮文字 / 彩色化通知卡片背景 -->
+    <color name="notification_accent">#2556B6</color>
 </resources>
