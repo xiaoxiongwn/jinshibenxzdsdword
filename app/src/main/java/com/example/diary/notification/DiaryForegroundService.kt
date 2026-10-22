@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.diary.MainActivity
 import com.example.diary.R
 
@@ -41,6 +42,7 @@ class DiaryForegroundService : Service() {
             .setContentTitle("日记本运行中")
             .setContentText("提醒服务已启动")
             .setSmallIcon(android.R.drawable.ic_menu_agenda)
+            .setColor(ContextCompat.getColor(this, R.color.notification_accent))
             .setOngoing(true)
             .setContentIntent(
                 PendingIntent.getActivity(
