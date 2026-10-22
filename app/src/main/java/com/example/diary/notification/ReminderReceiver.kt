@@ -8,7 +8,14 @@ import android.content.Context
 import android.content.Intent
 import android.media.RingtoneManager
 import android.os.Build
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.graphics.Typeface
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
+import com.example.diary.R
 import com.example.diary.MainActivity
 import com.example.diary.data.DiaryDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -103,11 +110,29 @@ class ReminderReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val accent = ContextCompat.getColor(context, R.color.notification_accent)
+
+        // 用 SpannableString 给标题/正文上色 + 加粗（原生 Android 系统通知栏会生效；
+        // 部分厂商 ROM 可能忽略 Span，此时退化为默认黑色文字，不影响功能）
+        val coloredTitle = SpannableString(title).apply {
+            setSpan(ForegroundColorSpan(accent), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(StyleSpan(Typeface.BOLD), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val previewText = content.take(50)
+        val coloredPreview = SpannableString(previewText).apply {
+            setSpan(ForegroundColorSpan(accent), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val coloredBig = SpannableString(content).apply {
+            setSpan(ForegroundColorSpan(accent), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title)
-            .setContentText(content.take(50))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setColor(accent)                 // 小图标着色 / 应用名颜色 / Action 按钮文字颜色
+            .setColorized(true)               // 高优先级通知时，让整张卡片背景染成强调色
+            .setContentTitle(coloredTitle)
+            .setContentText(coloredPreview)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(coloredBig))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
